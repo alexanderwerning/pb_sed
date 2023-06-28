@@ -100,8 +100,8 @@ def inference(
     else:
         assert len(model_kwargs) == len(model), (len(model), len(model_kwargs))
 
-    medfilt_length = np.array(medfilt_length, dtype=np.int)
-    apply_mask = np.array(apply_mask, dtype=np.bool)
+    medfilt_length = np.array(medfilt_length, dtype=int)
+    apply_mask = np.array(apply_mask, dtype=bool)
 
     for i in range(len(model)):
         assert hasattr(model[i], method), (model[i], method)
@@ -151,7 +151,7 @@ def inference(
 
                 if stepfilt_length is not None:
                     # boundary filtering:
-                    stepfilt_length = np.array(stepfilt_length, dtype=np.int)
+                    stepfilt_length = np.array(stepfilt_length, dtype=int)
                     segment_scores = filtering(
                         segment_scores, boundariesfilt, stepfilt_length)
 
@@ -160,6 +160,10 @@ def inference(
                     def post_processing_fn(x):
                         return x
 
+                if isinstance(seq_len, torch.Tensor):
+                    seq_len = seq_len.detach().cpu().numpy().astype(int)
+                else:
+                    seq_len = np.array(seq_len, dtype=int)
                 score_cache.update({
                     audio_id: post_processing_fn(
                         segment_scores[i, ..., :sl].swapaxes(-2, -1)

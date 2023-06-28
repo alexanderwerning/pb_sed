@@ -249,7 +249,7 @@ class CRNN(base.SoundEventModel):
         Returns:
 
         """
-        window_length = np.array(window_length, dtype=np.int)
+        window_length = np.array(window_length, dtype=int)
         x = inputs['stft']
         seq_len = np.array(inputs['seq_len'])
         x, seq_len = self.feature_extractor(x, seq_len=seq_len)

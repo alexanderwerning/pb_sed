@@ -8,8 +8,9 @@ from padertorch.contrib.je.modules.conv import Pad
 from padertorch.contrib.je.modules.features import NormalizedLogMelExtractor
 from padertorch.contrib.je.modules.reduce import TakeLast, Mean
 from padertorch.contrib.aw.transformer import TransformerEncoder
-from beats.positional import SinCos2DPositionalEncoder
+from padertorch.contrib.aw.patch_embed import pad_spec
 from pb_sed.models import base
+from paderbox.utils.nested import flatten, deflatten
 
 
 class Transformer(base.SoundEventModel):
@@ -29,16 +30,20 @@ class Transformer(base.SoundEventModel):
             share the same weights.
         reverse_pos_enc_bwd: If True, the positional encoding of the backward
             direction is reversed.
-        init: Initializer for the model parameters. If None, the default
+        init_path: Initializer for the model parameters. If None, the default
             initializer of the model is used.
 
     >>> from padertorch.contrib.aw.predictor import PredictorHead
     >>> from padertorch.contrib.aw.patch_embed import PatchEmbed
     >>> from padertorch.contrib.aw.transformer import TransformerEncoder
-    >>> from padertorch.contrib.aw.positional import SinCos2DPositionalEncoder
+    >>> from padertorch.contrib.aw.positional_encoding import SinCos2DPositionalEncoder
     >>> config = Transformer.get_config({\
             'encoder': {'factory': TransformerEncoder}, 'encoder_bwd': {'factory': TransformerEncoder},\
-            'predictor': {'factory': PredictorHead}, 'predictor_bwd': {'factory': PredictorHead},\
+            'predictor': {'factory': PredictorHead, 768,
+                 'num_classes': 10,
+                 'classifier_hidden_dims':[]}, 'predictor_bwd': {'factory': PredictorHead, 768,
+                 'num_classes': 10,
+                 'classifier_hidden_dims':[],\},\
             'patch_embed': {'factory': PatchEmbed}, 'pos_enc': {'factory': SinCos2DPositionalEncoder},\
             'feature_extractor': {\
                 'sample_rate': 16000,\
@@ -55,11 +60,11 @@ class Transformer(base.SoundEventModel):
     >>> review = transformer.review(inputs, outputs)
     """
     def __init__(
-            self, feature_extractor, patch_embed, pos_enc,  encoder, predictor,
+            self, feature_extractor, patch_embed, pos_enc, encoder, predictor,
             *, encoder_bwd=None, predictor_bwd=None, share_weights_transformer=False, share_weights_classifier=False, minimum_score=1e-5, label_smoothing=0.,
             labelwise_metrics=(), label_mapping=None, test_labels=None,
             slat=False, strong_fwd_bwd_loss_weight=1., class_weights=None,
-            reverse_pos_enc_bwd=False, init=None
+            reverse_pos_enc_bwd=False, init_path=None
     ):
         super().__init__(
             labelwise_metrics=labelwise_metrics,
@@ -71,14 +76,14 @@ class Transformer(base.SoundEventModel):
         self.pos_enc = pos_enc
         self.encoder = encoder
         if share_weights_transformer:
-            assert encoder_bwd is None
-            self.encoder_bwd = partial(self.encoder, backward=True)
+            # assert encoder_bwd is None
+            self.encoder_bwd = self.encoder
         else:
             assert encoder_bwd is not None
             self.encoder_bwd = encoder_bwd
         self.predictor = predictor
         if share_weights_classifier:
-            assert predictor_bwd is None
+            # assert predictor_bwd is None
             self.predictor_bwd = self.predictor
         else:
             assert predictor_bwd is not None
@@ -89,17 +94,23 @@ class Transformer(base.SoundEventModel):
         self.strong_fwd_bwd_loss_weight = strong_fwd_bwd_loss_weight
         self.class_weights = None if class_weights is None else torch.Tensor(class_weights)
         self.reverse_pos_enc_bwd = reverse_pos_enc_bwd
+        self.share_weights_transformer = share_weights_transformer
 
-        self.initialize(init)
+        self.initialize(init_path)
     
-    def initialize(self, init):
+    def initialize(self, init_path):
         """Initialize the model parameters from BEATs.
 
         Args:
-            init: Path to weight file.
+            init_path: Path to weight file.
         """
-        if init is not None:
-            state_dict = torch.load(init, map_location='cpu')['model']
+        if init_path is not None:
+            pt_file = torch.load(init_path, map_location='cpu')
+            if 'model' in pt_file:
+                state_dict = pt_file['model']
+            else:
+                # assume all weights are saved in root
+                state_dict = pt_file
             new_state_dict = {}
             for key, value in state_dict.items():
                 if 'patch_embedding' in key:
@@ -140,7 +151,9 @@ class Transformer(base.SoundEventModel):
                         key = key.replace('grep_linear', 'rel_pos_bias.grep_linear')
                 new_state_dict[key] = value
                 self.encoder.load_state_dict(new_state_dict, strict=False)
-                self.encoder_bwd.load_state_dict(new_state_dict, strict=False)
+                if self.encoder_bwd is not None:
+                    self.encoder_bwd.load_state_dict(new_state_dict, strict=False)
+            print(f"Loaded pretrained weights from {init_path}.")
 
     def sigmoid(self, y):
         """sigmoid function with minimum score margin
@@ -164,7 +177,7 @@ class Transformer(base.SoundEventModel):
         h, w = grid
         return rearrange(x, 'b (h w) d -> b h w d', h=h, w=w)
     
-    def create_frame_level_predictions(self, y):
+    def create_frame_level_predictions(self, y, pw=None, ow=None):
         """repeat patch-level predictions to frame-level predictions
         
         Args:
@@ -174,8 +187,10 @@ class Transformer(base.SoundEventModel):
             frame-level predictions, shape: (batch, num_classes, seq_len)
         """
         # y.shape: (batch, num_classes, grid_w)
-        _, pw = self.patch_embed.patch_size
-        _, ow = self.patch_embed.patch_overlap
+        if pw is None:
+            _, pw = self.patch_embed.patch_size
+        if ow is None:
+            _, ow = self.patch_embed.patch_overlap
 
         # repeat predictions to frame-level predictions
         if ow == 0:
@@ -196,7 +211,7 @@ class Transformer(base.SoundEventModel):
             grid: (grid_h, grid_w)
             encoder: encoder module
         
-        Returns:
+        Returns:sigmoid
             y_grid: grid-level predictions, shape: (batch, grid_h, grid_w, embedding_dim)
             seq_len_y: sequence length of y_grid
         """
@@ -204,7 +219,7 @@ class Transformer(base.SoundEventModel):
         y_grid = self.reshape_to_grid(y, grid=grid)  # output shape: (batch, grid_h, grid_w, embedding_dim)
         return y_grid, seq_len_y
     
-    def apply_predictor(self, y_grid, predictor):
+    def apply_predictor(self, y_grid, predictor, pw=None, ow=None):
         """apply predictor to grid-level predictions
 
         Args:
@@ -217,9 +232,64 @@ class Transformer(base.SoundEventModel):
         logits = predictor(y_grid)  # output shape: (batch, grid_w, num_classes)
         probs = self.sigmoid(logits)
         probs = rearrange(probs, 'b w c -> b c w')
-        probs = self.create_frame_level_predictions(probs)
+        probs = self.create_frame_level_predictions(probs, pw=pw, ow=ow)
         return probs
+    
+    def fwd_tagging(self, feats, seq_len):
+        seq_len_feats = feats.shape[-1]
+        if feats.ndim == 3:
+            feats = feats[:, None]
+        assert feats.ndim == 4
+        feats, pad_length = pad_spec(feats, self.patch_embed.patch_size, self.patch_embed.patch_overlap)
+        x, grid = self.patch_embed(feats)
+        x_fwd = self.pos_enc(x)
+        y_fwd_grid, seq_len_y = self.apply_encoder(x_fwd, grid, self.encoder)
+        probs_fwd = self.apply_predictor(y_fwd_grid, self.predictor)
+        assert probs_fwd.shape[-1] == feats.shape[-1]
+        if pad_length > 0:
+            probs_fwd = probs_fwd[..., :-pad_length]
+        assert probs_fwd.shape[-1] == seq_len_feats 
+        return probs_fwd, seq_len
 
+    def bwd_tagging(self, feats, seq_len):
+        seq_len_feats = feats.shape[-1]
+        if feats.ndim == 3:
+            feats = feats[:, None]
+        assert feats.ndim == 4
+        feats, pad_length = pad_spec(feats, self.patch_embed.patch_size, self.patch_embed.patch_overlap)
+        x, grid = self.patch_embed(feats)
+        if self.reverse_pos_enc_bwd:
+            x_bwd = self.revert_time(self.pos_enc(self.revert_time(x, grid)), grid)  # apply pos_enc to reversed input
+        else:
+            x_bwd = self.pos_enc(x)
+        if self.share_weights_transformer:
+            y_bwd_grid, seq_len_y_ = self.apply_encoder(self.revert_time(x_bwd, grid), grid, self.encoder_bwd)  # apply forward transformer to reversed input
+            y_bwd_grid = y_bwd_grid.flip(-2)  # revert again for loss computation
+        else:
+            y_bwd_grid, seq_len_y_ = self.apply_encoder(x_bwd, grid, self.encoder_bwd)
+        probs_bwd = self.apply_predictor(y_bwd_grid, self.predictor_bwd)
+        assert probs_bwd.shape[-1] == feats.shape[-1]
+        if pad_length > 0:
+            probs_bwd = probs_bwd[..., :-pad_length]
+        assert probs_bwd.shape[-1] == seq_len_feats 
+        return probs_bwd, seq_len
+
+
+    def revert_time(self, x, grid):
+        """reverse time dimension
+        
+        Args:
+            x: input, shape: (batch, p, d)
+        
+        Returns:
+            x: input, shape: (batch, p, d)
+        """
+        x = rearrange(x, 'b (h w) d -> b h w d', h=grid[0], w=grid[1])
+        x = x.flip(dims=[2])
+        x = rearrange(x, 'b h w d -> b (h w) d')
+        return x
+
+    
     def forward(self, inputs):
         """
         forward used in trainer
@@ -228,6 +298,7 @@ class Transformer(base.SoundEventModel):
             inputs: example dict
 
         Returns:
+            outputs: probs_fwd, probs_bwd, feats, targets, seq_len
 
         """
         # TODO: compute stft on GPU?
@@ -245,29 +316,42 @@ class Transformer(base.SoundEventModel):
             feats, seq_len_x = self.feature_extractor(x, seq_len=seq_len)
             targets = None
         
-        x, grid = self.patch_embed(feats)
-        # x.shape: (batch, num_patches, embedding_dim)
-
-        x_fwd = self.pos_enc(x)
+        # feats, pad_length = pad_spec(feats, self.patch_embed.patch_size, self.patch_embed.patch_overlap)
         
-        #TODO: mask padding, sequence length is padded, what happens to the target etc?
-        y_fwd_grid, seq_len_y = self.apply_encoder(x_fwd, grid, self.encoder)
+        # x, grid = self.patch_embed(feats)
+        # # x.shape: (batch, num_patches, embedding_dim)
 
-        probs_fwd = self.apply_predictor(y_fwd_grid, self.predictor)
+        # x_fwd = self.pos_enc(x)
+        
+        # y_fwd_grid, seq_len_y = self.apply_encoder(x_fwd, grid, self.encoder)
+
+        # probs_fwd = self.apply_predictor(y_fwd_grid, self.predictor)
+        probs_fwd, seq_len_y = self.fwd_tagging(feats, seq_len_x)
         
         probs_bwd = None
         if self.encoder_bwd is None:
             probs_bwd = None
         else:
-            if self.reverse_pos_enc_bwd:
-                x_bwd = self.pos_enc(x.flip(-2)).flip(-2)  # apply pos_enc to reversed input, this assumes absolute pos encodings
-            else:
-                x_bwd = x_fwd
-            y_bwd_grid, seq_len_y_ = self.apply_encoder(x_bwd, grid, self.encoder_bwd)
-            probs_bwd = self.apply_predictor(y_bwd_grid, self.predictor_bwd)
-            assert (seq_len_y_ == seq_len_y)
+            # if self.reverse_pos_enc_bwd:
+            #     x_bwd = self.revert_time(self.pos_enc(self.revert_time(x, grid)), grid)  # apply pos_enc to reversed input
+            # else:
+            #     x_bwd = x_fwd
+            # if self.share_weights_transformer:
+            #     y_bwd_grid, seq_len_y_ = self.apply_encoder(self.revert_time(x_bwd, grid), grid, self.encoder_bwd)  # apply forward transformer to reversed input
+            #     y_bwd_grid = y_bwd_grid.flip(-2)  # revert again for loss computation
+            # else:
+            #     y_bwd_grid, seq_len_y_ = self.apply_encoder(x_bwd, grid, self.encoder_bwd)
+            # probs_bwd = self.apply_predictor(y_bwd_grid, self.predictor_bwd)
+            probs_bwd, seq_len_y_ = self.bwd_tagging(feats, seq_len_x)
+            assert np.all(seq_len_y_ == seq_len_y)
     
-        return probs_fwd, probs_bwd, feats, targets, seq_len
+        # probs.shape: (batch, num_classes, seq_len)
+
+        # if pad_length > 0:
+        #     feats = feats[..., :-pad_length]
+        #     probs_fwd = probs_fwd[..., :-pad_length]
+        #     probs_bwd = probs_bwd[..., :-pad_length]
+        return probs_fwd, probs_bwd, feats, targets, np.asarray(inputs['seq_len'])
 
     def read_targets(self, inputs, subsample_idx=None):
         if 'boundary_targets' in inputs:
@@ -346,6 +430,16 @@ class Transformer(base.SoundEventModel):
             ),
         )
         return review
+    
+    def load_encoder_state_dict(self, state_dict):
+        self.encoder.load_state_dict(
+            flatten(state_dict['encoder']), strict=False)
+        self.encoder_bwd.load_state_dict(
+            flatten(state_dict['encoder_bwd']), strict=False)
+        self.patch_embed.load_state_dict(
+            flatten(state_dict['patch_embed']), strict=False)
+        self.pos_enc.load_state_dict(
+            flatten(state_dict['pos_enc']), strict=False)
 
     def compute_weak_fwd_bwd_loss(self, y_fwd, y_bwd, targets, seq_len):
         if self.label_smoothing > 0.:
@@ -353,12 +447,10 @@ class Transformer(base.SoundEventModel):
                 targets, min=self.label_smoothing, max=1-self.label_smoothing)
         if y_bwd is None:
             y_weak = TakeLast(axis=2)(y_fwd, seq_len=seq_len)
-            # y_weak = y_weak + 0.1 * (weak_targets - y_weak)
             return nn.BCELoss(reduction='none')(y_weak, targets)[..., None].expand(y_fwd.shape)
         else:
             y_weak = torch.maximum(y_fwd, y_bwd)
             targets = targets[..., None].expand(y_weak.shape)
-            # y_weak = y_weak + 0.1 * (weak_targets_ - y_weak)
             return nn.BCELoss(reduction='none')(y_weak, targets)
 
     def compute_strong_fwd_bwd_loss(self, y_fwd, y_bwd, targets):
@@ -392,8 +484,8 @@ class Transformer(base.SoundEventModel):
         return summary
 
     def tagging(self, inputs):
-        y_fwd, y_bwd, seq_len_y, *_ = self.forward(inputs)
-        seq_len = torch.ones_like(seq_len_y)
+        y_fwd, y_bwd, _, _, seq_len_y, *_ = self.forward(inputs)
+        seq_len = torch.ones(seq_len_y.shape)
         if y_bwd is None:
             return TakeLast(axis=-1, keepdims=True)(y_fwd, seq_len_y), seq_len
         return (
@@ -405,7 +497,7 @@ class Transformer(base.SoundEventModel):
         )
 
     def boundaries_detection(self, inputs):
-        y_fwd, y_bwd, seq_len_y, *_ = self.forward(inputs)
+        y_fwd, y_bwd, _, _, seq_len_y, *_ = self.forward(inputs)
         seq_mask = compute_mask(y_fwd, seq_len_y, batch_axis=0, sequence_axis=-1)
         return torch.minimum(y_fwd*seq_mask, y_bwd*seq_mask), seq_len_y
 
@@ -420,7 +512,7 @@ class Transformer(base.SoundEventModel):
         Returns:
 
         """
-        window_length = np.array(window_length, dtype=np.int)
+        window_length = np.array(window_length, dtype=int)
         x = inputs['stft']
         seq_len = np.array(inputs['seq_len'])
         feats, seq_len = self.feature_extractor(x, seq_len=seq_len)
@@ -456,7 +548,8 @@ class Transformer(base.SoundEventModel):
     def _single_window_length_sed(
             self, feats, seq_len, window_length, window_shift
     ):
-        b, f, t = feats.shape
+        b, _, f, t = feats.shape
+        h = rearrange(feats, 'b 1 f t -> b f t')
         if window_length > window_shift:
             h = Pad('both')(h, (window_length - window_shift))
         h = Pad('end')(h, window_shift - 1)
