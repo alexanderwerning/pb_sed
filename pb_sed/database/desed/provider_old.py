@@ -1,23 +1,11 @@
-from pb_sed.data_preparation.provider import DataProvider
+
 import dataclasses
+from pb_sed.data_preparation.provider import DataProvider
 from pb_sed.paths import database_jsons_dir
 
-def get_non_empty_datasets(data_provider):
-    return list(filter(
-        lambda key: data_provider.train_set[key] > 0,
-        data_provider.train_set.keys()
-    ))
+
 @dataclasses.dataclass
 class DESEDProvider(DataProvider):
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.train_transform.label_encoder.initialize_labels(
-            dataset=self.db.get_dataset(get_non_empty_datasets(self)
-            ),
-            verbose=True
-        )
-        self.test_transform.label_encoder.initialize_labels()
 
     @classmethod
     def finalize_dogmatic_config(cls, config):

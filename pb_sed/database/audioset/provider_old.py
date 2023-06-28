@@ -1,7 +1,7 @@
 
 import dataclasses
 import lazy_dataset
-from typing import List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Mapping, Sequence
 from padertorch.configurable import _DogmaticConfig
 from pb_sed.data_preparation.provider import DataProvider
 from pb_sed.paths import database_jsons_dir
@@ -10,19 +10,18 @@ from pb_sed.paths import database_jsons_dir
 @dataclasses.dataclass
 class AudioSetProvider(DataProvider):
     add_ancestor_events: bool = False
-    def get_raw(
-            self,
-            dataset_handle: Union[str, lazy_dataset.Dataset],
-            discard_labelless_examples: bool=False,
-            filter_example_ids: Optional[List[str]]=None,
-    ) -> lazy_dataset.Dataset:
 
+    def get_raw(
+            self, dataset_names_or_raw_datasets,
+            discard_labelless_examples=False,
+            filter_example_ids=None,
+    ):
         raw_dataset = super().get_raw(
-            dataset_handle=dataset_handle,
+            dataset_names_or_raw_datasets=dataset_names_or_raw_datasets,
             discard_labelless_examples=discard_labelless_examples,
             filter_example_ids=filter_example_ids,
         )
-        if self.add_ancestor_events:
+        if self.add_ancestor_events and isinstance(raw_dataset, lazy_dataset.Dataset):
             ontology = self.db.data['ontology']
             ds_names = self._get_dataset_names(self.train_set, self.validate_set)
             event_classes = set(self.db.data['strong_event_classes']) \
