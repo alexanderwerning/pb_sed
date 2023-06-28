@@ -20,9 +20,11 @@ class Transform:
     anchor_shift_sampling_fn: Callable = None
 
     def __post_init__(self):
-        if isinstance(self.stft, dict):
-            self.stft = STFT(**self.stft)
-        assert isinstance(self.stft, STFT), type(self.stft)
+        # if isinstance(self.stft, dict):
+        #     self.stft = STFT(**self.stft)
+        # assert isinstance(self.stft, STFT), type(self.stft)
+        print("pb_sed/data_preparation/transform.py: no stft object type check and no strong labels")
+        pass
 
     def __call__(self, example):
         """
@@ -71,57 +73,57 @@ class Transform:
             'weak_targets': weak_targets,
         }
 
-        start_frames_key = f'{self.label_encoder.label_key}_start_frames'
-        stop_frames_key = f'{self.label_encoder.label_key}_stop_frames'
-        boundary_labels = {}
-        for i, event_label in enumerate(example[self.label_encoder.label_key]):
-            if label_types[i] not in ['boundaries', 'strong']:
-                continue
-            if event_label not in boundary_labels:
-                boundary_labels[event_label] = (
-                    example[start_frames_key][i],
-                    example[stop_frames_key][i],
-                )
-            else:
-                boundary_labels[event_label] = (
-                    min(boundary_labels[event_label][0], example[start_frames_key][i]),
-                    max(boundary_labels[event_label][1], example[stop_frames_key][i]),
-                )
+        # start_frames_key = f'{self.label_encoder.label_key}_start_frames'
+        # stop_frames_key = f'{self.label_encoder.label_key}_stop_frames'
+        # boundary_labels = {}
+        # for i, event_label in enumerate(example[self.label_encoder.label_key]):
+        #     if label_types[i] not in ['boundaries', 'strong']:
+        #         continue
+        #     if event_label not in boundary_labels:
+        #         boundary_labels[event_label] = (
+        #             example[start_frames_key][i],
+        #             example[stop_frames_key][i],
+        #         )
+        #     else:
+        #         boundary_labels[event_label] = (
+        #             min(boundary_labels[event_label][0], example[start_frames_key][i]),
+        #             max(boundary_labels[event_label][1], example[stop_frames_key][i]),
+        #         )
 
-        boundary_labels = [
-            (
-                boundary_labels[event_label][0],
-                boundary_labels[event_label][1],
-                self.label_encoder.encode(event_label),
-            ) for event_label in boundary_labels
-        ]
-        strong_labels = [
-            (
-                example[start_frames_key][i],
-                example[stop_frames_key][i],
-                self.label_encoder.encode(event_label),
-            ) for i, event_label in enumerate(example[self.label_encoder.label_key])
-            if label_types[i] == 'strong'
-        ]
-        if self.provide_boundary_targets or self.provide_strong_targets:
-            overall_targets = self.label_encoder(example)['events']
-            if self.provide_boundary_targets:
-                boundary_targets = self.label_encoder.encode_alignment(
-                    boundary_labels, seq_len=seq_len)
-                if unlabeled:
-                    boundary_targets += (1-boundary_targets) * 0.5
-                else:
-                    boundary_targets += (1-boundary_targets) * 0.5 * overall_targets
-                example_['boundary_targets'] = boundary_targets.T
+        # boundary_labels = [
+        #     (
+        #         boundary_labels[event_label][0],
+        #         boundary_labels[event_label][1],
+        #         self.label_encoder.encode(event_label),
+        #     ) for event_label in boundary_labels
+        # ]
+        # strong_labels = [
+        #     (
+        #         example[start_frames_key][i],
+        #         example[stop_frames_key][i],
+        #         self.label_encoder.encode(event_label),
+        #     ) for i, event_label in enumerate(example[self.label_encoder.label_key])
+        #     if label_types[i] == 'strong'
+        # ]
+        # if self.provide_boundary_targets or self.provide_strong_targets:
+        #     overall_targets = self.label_encoder(example)['events']
+        #     if self.provide_boundary_targets:
+        #         boundary_targets = self.label_encoder.encode_alignment(
+        #             boundary_labels, seq_len=seq_len)
+        #         if unlabeled:
+        #             boundary_targets += (1-boundary_targets) * 0.5
+        #         else:
+        #             boundary_targets += (1-boundary_targets) * 0.5 * overall_targets
+        #         example_['boundary_targets'] = boundary_targets.T
 
-            if self.provide_strong_targets:
-                strong_targets = self.label_encoder.encode_alignment(
-                    strong_labels, seq_len=seq_len)
-                if unlabeled:
-                    strong_targets += (1-strong_targets) * 0.5
-                else:
-                    strong_targets += (1-strong_targets) * 0.5 * overall_targets
-                example_['strong_targets'] = strong_targets.T
+        #     if self.provide_strong_targets:
+        #         strong_targets = self.label_encoder.encode_alignment(
+        #             strong_labels, seq_len=seq_len)
+        #         if unlabeled:
+        #             strong_targets += (1-strong_targets) * 0.5
+        #         else:
+        #             strong_targets += (1-strong_targets) * 0.5 * overall_targets
+        #         example_['strong_targets'] = strong_targets.T
 
         if self.pop_audio_data:
             example_.pop('audio_data')

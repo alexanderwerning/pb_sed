@@ -15,6 +15,7 @@ class DataFetcher:
     bucket_expiration: int = None
     max_bucket_buffer_size: int = None
     drop_incomplete: bool = False
+    use_batch_builder_worker: bool = True
 
     def __call__(self, dataset, batched_input=False):
         if self.global_shuffle:
@@ -48,5 +49,7 @@ class DataFetcher:
                 max_buffered_examples=self.max_bucket_buffer_size,
                 drop_incomplete=self.drop_incomplete,
                 sort_key="seq_len", reverse_sort=True,
-            ).map(Collate()).prefetch(num_workers=1, buffer_size=4)
+            ).map(Collate())
+            if self.use_batch_builder_worker:
+                dataset = dataset.prefetch(num_workers=1, buffer_size=4)
         return dataset

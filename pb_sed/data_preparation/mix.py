@@ -17,9 +17,9 @@ class MixtureDataset(Dataset):
 
         Args:
             input_dataset: lazy dataset providing example dict with key audio_length.
-            mixin_dataset:
-            mix_interval:
-            mix_fn:
+            mixin_dataset: lazy dataset providing example dict with key audio_length.
+            mix_interval: int, how often to mix in examples from mixin_dataset.
+            mix_fn: function, takes list of examples and returns a single example.
         """
         assert len(mixin_dataset) >= len(input_dataset), (len(mixin_dataset), len(input_dataset))
         self.input_dataset = input_dataset
@@ -66,7 +66,9 @@ class MixtureDataset(Dataset):
 
 
 class SuperposeEvents:
-    """
+    """ Superpose events from two examples.
+
+
     >>> mix_fn = SuperposeEvents(min_overlap=0.5)
     >>> example1 = {'example_id': '0', 'dataset': '0', 'audio_data': np.ones((1, 8)), 'events': ['a'], 'events_start_samples': [2], 'events_stop_samples': [8], 'label_types': ['strong'],}
     >>> example2 = {'example_id': '1', 'dataset': '1', 'audio_data': -np.ones((1, 10)), 'events': ['a', 'b'], 'events_start_samples': [0, 1], 'events_stop_samples': [8, 4], 'label_types': ['weak', 'strong']}

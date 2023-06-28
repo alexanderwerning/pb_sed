@@ -19,39 +19,6 @@ from pb_sed.data_preparation.transform import Transform
 import logging
 
 
-def to_repetition_list(collection, filter_empty=True):
-    """given a string, a list, tuple or a repetition_dict, return a valid repetition_dict
-    filter_empty discards elements with zero repetitions"""
-    if isinstance(collection, str):
-        # not an actual collection, single item
-        return [(collection, 1)]
-    elif isinstance(collection, (list, tuple)):
-        # elements should have the structure (str, int) (unrolled repetiticion_dict)
-        repetition_list = []
-        for element in collection:
-            if isinstance(element, (list, tuple)):
-                assert len(element) == 2, "Only dataset, repetition tuples are allowed"
-                assert isinstance(element[1], int), "Repetitions must be an integer"
-                _, reps = element
-                if reps > 0:
-                    repetition_list.append(element)
-            else:
-                assert not isinstance(element, dict), "No nesting allowed, manually flatten the data structure"
-                # element should be a dataset now, which is repeated once
-                repetition_list.append((element, 1))
-        return repetition_list
-    elif isinstance(collection, dict):
-        repetition_list = []
-        for dataset, repetition in collection.items():
-            assert isinstance(repetition, int), "No nesting allowed, manually flatten the data structure"
-            assert not isinstance(dataset, (list, tuple)), "No nesting allowed, manually flatten the data structure"
-            if repetition > 0:
-             repetition_list.append((dataset, repetition))
-        return repetition_list 
-    else:
-        raise ValueError(f"Unknown collection type {type(collection)}")
-
-
 @dataclasses.dataclass
 class DataProvider(Configurable):
     json_path: str
@@ -97,134 +64,151 @@ class DataProvider(Configurable):
         return self.get_dataset(self.validate_set, train=False, filter_example_ids=filter_example_ids)
 
     def get_dataset(self, dataset_names_or_raw_datasets, train=False, filter_example_ids=None):
-        repetition_list = to_repetition_list(dataset_names_or_raw_datasets)
-        ds = self.prepare_audio(repetition_list, train=train, filter_example_ids=filter_example_ids)
+        # need: dataset_names_or_raw_datasets string or dictionary (list maybe?), but no nesting
+        ds = self.prepare_audio(dataset_names_or_raw_datasets, train=train, filter_example_ids=filter_example_ids)
         ds = self.segment_transform_and_fetch(ds, train=train)
         return ds
 
-    def prepare_audio(self,
-                      repetition_list: List[Tuple[lazy_dataset.Dataset, int]],
-                      train: bool=False,
-                      filter_example_ids: Optional[List[str]]=None) -> lazy_dataset.Dataset:
+    def prepare_audio(self, dataset_names_or_raw_datasets, train=False, filter_example_ids=None):
         individual_audio_datasets = self._load_audio(
-            repetition_list, train=train, filter_example_ids=filter_example_ids)
-        # enforce a single output structure
-        assert isinstance(individual_audio_datasets, list)
-        assert isinstance(individual_audio_datasets[0], tuple)
-        assert isinstance(individual_audio_datasets[0][0], lazy_dataset.Dataset)
-        assert isinstance(individual_audio_datasets[0][1], int)
-        
+            dataset_names_or_raw_datasets, train=train, filter_example_ids=filter_example_ids)
+        # why this, just enforce a single output type
+        if not isinstance(individual_audio_datasets, list):
+            assert isinstance(individual_audio_datasets, lazy_dataset.Dataset), type(individual_audio_datasets)
+            individual_audio_datasets = [(individual_audio_datasets, 1)]
+        # tile and intersperse cannot handle nested datasets!!!
+        combined_audio_dataset = self._tile_and_intersperse(
+            individual_audio_datasets, shuffle=train)
+
         if train and self.min_class_examples_per_epoch > 0:
-            # repeat examples to meet minimum class examples per epoch
-            # compute label counts on raw_datasets (no audio/data loaded)
             assert self.label_key is not None
-            raw_datasets = []
-            for ds, reps in repetition_list:
-                raw_dataset = self.get_raw(
-                    ds,
-                    discard_labelless_examples=self.discard_labelless_train_examples,
-                    filter_example_ids=filter_example_ids,
-                )
-                raw_datasets.append((raw_dataset, reps))
-                    
+            logging.info(f"provider: {dataset_names_or_raw_datasets}")
+            raw_datasets = self.get_raw(
+                dataset_names_or_raw_datasets,
+                discard_labelless_examples=self.discard_labelless_train_examples,
+                filter_example_ids=filter_example_ids,
+            )
+            # repeating examples for class balancing
             label_counts, labels = self._count_labels(
                 raw_datasets, self.label_key)
             label_reps = self._compute_label_repetitions(
                 label_counts, min_counts=self.min_class_examples_per_epoch)
-            # apply label count information to datasets with loaded audio
             repetition_groups = self._build_repetition_groups(
                 individual_audio_datasets, labels, label_reps)
+            
             logging.info(f"provider num repetition_groups {len(repetition_groups)}")
+            logging.info(f"provider repetitions {[(len(ds), reps) for (ds, reps) in repetition_groups]}")
+            dataset = self._tile_and_intersperse(
+                repetition_groups, shuffle=train)
         else:
-            # tile/intersperse according to original repetitions
-            repetition_groups = individual_audio_datasets
-        # save repetition groups as datasets
-        dataset = self._tile_and_intersperse(
-            repetition_groups, shuffle=train)
-
+            dataset = combined_audio_dataset
+        # 
         if train:
+            # dataset = self.scale_and_mix(dataset, combined_audio_dataset)
             dataset = self.scale_and_mix(dataset, dataset)
-        logging.info(f'Total data set length: {len(dataset)}')
+        print(f'Total data set length:', len(dataset))
         return dataset
 
     def _load_audio(self,
-                    repetition_list: List[Tuple[lazy_dataset.Dataset, int]],
-                    train: bool=False,
-                    filter_example_ids: Optional[List[str]]=None,
-                    idx: Optional[str]=None) -> List[Tuple[lazy_dataset.Dataset, int]]:
-        """Load audio from the given datasets.
+                    dataset_names_or_raw_datasets: Union[str, List[str], Tuple[str], Dict[str, int], lazy_dataset.Dataset],
+                    train=False,
+                    filter_example_ids=None,
+                    idx=None):
+        if isinstance(dataset_names_or_raw_datasets, (dict, list, tuple)):
+            ds = []
+            for i, name_or_ds in enumerate(dataset_names_or_raw_datasets):
+                num_reps = (
+                    dataset_names_or_raw_datasets[name_or_ds]
+                    if isinstance(dataset_names_or_raw_datasets, dict)
+                    else name_or_ds[1] if isinstance(name_or_ds, (list, tuple))
+                    else 1
+                )
+                if num_reps == 0:
+                    continue
+                ds.append((
+                    self._load_audio(
+                        name_or_ds[0] if isinstance(name_or_ds, (list, tuple))
+                        else name_or_ds,
+                        train=train, filter_example_ids=filter_example_ids, idx=i,
+                    ),
+                    num_reps
+                ))
+            # may be nested repetition object
+            return ds
+        # possible types for dataset_names_or_raw_datasets: str, lazy_dataset.Dataset
+        ds = self.get_raw(
+            dataset_names_or_raw_datasets,
+            discard_labelless_examples=(
+                train and self.discard_labelless_train_examples
+            ),
+            filter_example_ids=filter_example_ids,
+        ).map(self.audio_reader)
+        cache = (
+            self.cached_datasets is not None
+            and isinstance(dataset_names_or_raw_datasets, str)
+            and dataset_names_or_raw_datasets in self.cached_datasets
+        )
+        if cache:
+            ds = ds.cache(lazy=False)
+
+        if isinstance(dataset_names_or_raw_datasets, str):
+            ds_name = " " + dataset_names_or_raw_datasets
+        else:
+            ds_name = ""
+        if idx is not None:
+            ds_name += f" [{idx}]"
+        print(f'Single data set length{ds_name}:', len(ds))
+        return ds
+
+    def get_raw(
+            self, dataset_names_or_raw_datasets: Union[str, List[str], Dict[str, int], List[Tuple[str, int]]],
+            discard_labelless_examples=False,
+            filter_example_ids=None,
+    ):
+        """	Returns a dataset with the raw examples from the given datasets.
 
         Args:
             dataset_names_or_raw_datasets: A list of dataset names or raw datasets.
-            train: Whether to load the training or validation set.
-            filter_example_ids: A list of example ids to filter the dataset.
-            idx: String appended to the dataset name.
-
-        Returns:
-            A list of tuples of the form (dataset, repetitions).
-        """
-        loaded_repetition_list = []
-        for dataset_handle, repetition in repetition_list:
-            ds = self.get_raw(dataset_handle,
-                discard_labelless_examples=(
-                    train and self.discard_labelless_train_examples
-                ),
-                filter_example_ids=filter_example_ids,
-            )
-            ds = ds.map(self.audio_reader)
-            cache = (
-                self.cached_datasets is not None
-                and isinstance(dataset_handle, str)
-                and dataset_handle in self.cached_datasets
-            )
-            if cache:
-                ds = ds.cache(lazy=False)
-
-            if isinstance(dataset_handle, str):
-                ds_name = " " + dataset_handle
-            else:
-                ds_name = ""
-            if idx is not None:
-                ds_name += f" [{idx}]"
-            logging.info(f'Single data set length{ds_name}: {len(ds)}')
-            loaded_repetition_list.append((ds, repetition))
-        return loaded_repetition_list
-
-
-    def get_raw(
-            self,
-            dataset_handle: Union[str, lazy_dataset.Dataset],
-            discard_labelless_examples: bool=False,
-            filter_example_ids: Optional[List[str]]=None,
-    ) -> lazy_dataset.Dataset:
-        """	Returns a dataset with the raw examples from the given datasets.
-
-        Raw refers to examples for which no audio has been loaded yet.
-
-        Args:
-            dataset_handle: The name of a dataset or a lazy_dataset.Dataset.
             discard_labelless_examples: If True, examples without a label are discarded.
             filter_example_ids: If given, only examples with an ID in this list are returned.
 
         Returns:
             A lazy dataset with the raw examples.
         """
-        if isinstance(dataset_handle, str):
+        if isinstance(dataset_names_or_raw_datasets, (dict, list, tuple)):
+            if isinstance(dataset_names_or_raw_datasets, dict):
+                dataset_names_or_raw_datasets = list(dataset_names_or_raw_datasets.items())
+            if (
+                isinstance(dataset_names_or_raw_datasets, (list, tuple))
+                and not isinstance(dataset_names_or_raw_datasets[0], (list, tuple))
+            ):
+                dataset_names_or_raw_datasets = [
+                    (ds, 1) for ds in dataset_names_or_raw_datasets]
+            # dataset_names_or_raw_datasets: List[Tuple[str, int]]
+            dataset_names_or_raw_datasets = list(filter(
+                lambda x: x[1] > 0, dataset_names_or_raw_datasets
+            ))
+            # recursive application of this function
+            # allows for nested lists of dataset names -> why?
+            return [
+                (
+                    self.get_raw(
+                        name_or_ds[0] if isinstance(name_or_ds, (list, tuple))
+                        else name_or_ds,
+                        discard_labelless_examples=discard_labelless_examples,
+                        filter_example_ids=filter_example_ids,
+                    ),
+                    name_or_ds[1],
+                )
+                for name_or_ds in dataset_names_or_raw_datasets
+            ]
+        elif isinstance(dataset_names_or_raw_datasets, str):
             # simple: dataset is given by its name
-            ds = self.db.get_dataset(dataset_handle)
+            ds = self.db.get_dataset(dataset_names_or_raw_datasets)
         else:
-            assert isinstance(dataset_handle, lazy_dataset.Dataset), type(dataset_handle)
+            assert isinstance(dataset_names_or_raw_datasets, lazy_dataset.Dataset), type(dataset_names_or_raw_datasets)
             # dataset is given as lazy_dataset -> why?
-            ds = dataset_handle
-        ds = self._apply_filters(ds,
-                                discard_labelless_examples=discard_labelless_examples,
-                                filter_example_ids=filter_example_ids)
-        return ds
-    
-    def _apply_filters(self,
-                        ds: lazy_dataset.Dataset,
-                        discard_labelless_examples: bool=True,
-                        filter_example_ids: Optional[List[str]]=None) -> lazy_dataset.Dataset:
+            ds = dataset_names_or_raw_datasets
         # filtering: discard labelless examples and/or filter by example ID and by audio length
         if discard_labelless_examples:
             ds = ds.filter(
@@ -239,8 +223,7 @@ class DataProvider(Configurable):
             lambda ex: 'audio_length' in ex and ex['audio_length'] > self.min_audio_length, lazy=False
         )
 
-    def _tile_and_intersperse(self, datasets: List[Tuple[lazy_dataset.Dataset, int]],
-                              shuffle: bool=False) -> lazy_dataset.Dataset:
+    def _tile_and_intersperse(self, datasets, shuffle=False):
         """ Tiles and intersperses datasets.
 
         Args:
@@ -258,9 +241,7 @@ class DataProvider(Configurable):
             *[ds.tile(reps) for ds, reps in datasets]
         )
 
-    def scale_and_mix(self,
-                      dataset: lazy_dataset.Dataset,
-                      mixin_dataset: Optional[lazy_dataset.Dataset]=None) -> lazy_dataset.Dataset:
+    def scale_and_mix(self, dataset, mixin_dataset=None):
         """ Scale audio data and mix datasets.
 
         Args:
@@ -291,36 +272,28 @@ class DataProvider(Configurable):
             )
         return dataset
 
-    def _count_labels(self,
-                      raw_datasets: List[Tuple[lazy_dataset.Dataset, int]],
-                      label_key,
-                      reps=1) -> Tuple[Dict[str, int], List[List[List[str]]]]:
-        """Count the labels in a dataset.
+    def _count_labels(self, raw_datasets, label_key, label_counts=None, reps=1):
+        if label_counts is None:
+            label_counts = defaultdict(lambda: 0)
+        if isinstance(raw_datasets, list):
+            labels = []
+            for ds, ds_reps in raw_datasets:
+                label_counts, cur_labels = self._count_labels(
+                    ds, label_key, label_counts=label_counts, reps=ds_reps*reps
+                )
+                labels.append(cur_labels)
+            return label_counts, labels
 
-        Args:
-            raw_datasets: A list of tuples containing a dataset
-            and its number of repetitions.
-            label_key: The key of the label in the dataset.
-            reps: The number of repetitions of the dataset.
-
-        Returns:
-            A tuple of the updated label counts and a list with entries per dataset, each a list with all labels for each example.
-        """
-        label_counts = defaultdict(lambda: 0)
         labels = []
-        for ds, ds_reps in raw_datasets:
-            cur_labels = []
-            for example in ds:
-                ex_labels = sorted(set(to_list(example[label_key])))
-                cur_labels.append(ex_labels)
-                for label in ex_labels:
-                    label_counts[label] += ds_reps * reps
+        for example in raw_datasets:
+            cur_labels = sorted(set(to_list(example[label_key])))
             labels.append(cur_labels)
+            for label in cur_labels:
+                label_counts[label] += reps
         return label_counts, labels
 
     @staticmethod
-    def _compute_label_repetitions(label_counts: Dict[str, int],
-    min_counts: Union[int, float]) -> Dict[str, int]:
+    def _compute_label_repetitions(label_counts, min_counts):
         """Compute label repetitions for a dataset.
 
         Args:
@@ -337,9 +310,7 @@ class DataProvider(Configurable):
             assert 0. < min_counts < 1., min_counts
             min_counts = math.ceil(max_count * min_counts)
         assert isinstance(min_counts, int) and min_counts > 1, min_counts
-        assert min_counts - 1 <= 0.9 * max_count, (f"The minimum number of label repetitions should be "
-                                                  f"less than 90 percent of the dataset length {(min_counts, max_count)}")
-        
+        assert min_counts - 1 <= 0.9 * max_count, (min_counts, max_count)
         base_rep = 1 // (1 - (min_counts-1)/max_count)
         min_counts *= base_rep
         label_repetitions = {
@@ -348,47 +319,48 @@ class DataProvider(Configurable):
         }
         return label_repetitions
 
-    def _build_repetition_groups(self,
-    dataset: List[Tuple[lazy_dataset.Dataset, int]],
-    labels: List[List[List[str]]],
-    label_repetitions) -> List[Tuple[lazy_dataset.Dataset, int]]:
+    def _build_repetition_groups(self, dataset, labels, label_repetitions):
         """	Build repetition groups for a dataset.
 
         Args:
-            dataset: A dataset or a list of datasets.
+            dataset: A dataset.
             labels: A list of lists of labels.
             label_repetitions: A dict mapping labels to repetitions.
         
         Returns:
             A list of (dataset, repetitions) pairs.
         """
-        # new datasets of examples with same repetitions
-        datasets = []
-        for dataset_repetitions, ds_labels in zip(dataset, labels):
-            ds, ds_reps = dataset_repetitions
-            # maximum of label repetitions (labels-to-be-repeated) per example
-            idx_reps = [
-                max([label_repetitions[label] for label in idx_labels])
-                for idx_labels in ds_labels
+        assert len(dataset) == len(labels), (len(dataset), len(labels))
+        if isinstance(dataset, list):
+            return [
+                (group_ds, ds_reps*group_reps)
+                for (ds, ds_reps), cur_labels in zip(dataset, labels)
+                for group_ds, group_reps in self._build_repetition_groups(
+                    ds, cur_labels, label_repetitions
+                )
             ]
-            rep_groups = {}
-            # group by number of repetitions
-            for n_reps in set(idx_reps):
-                rep_groups[n_reps] = np.argwhere(
-                    np.array(idx_reps) == n_reps
-                ).flatten().tolist()
-            # new datasets of examples with same repetitions
-            datasets = []
-            for n_reps, indices in sorted(
-                    rep_groups.items(), key=lambda x: x[0]
-            ):
-                datasets.append((ds[sorted(indices)], n_reps*ds_reps))
+        idx_reps = [
+            max([label_repetitions[label] for label in idx_labels])
+            for idx_labels in labels
+        ]
+        rep_groups = {}
+        for n_reps in set(idx_reps):
+            rep_groups[n_reps] = np.argwhere(
+                np.array(idx_reps) == n_reps
+            ).flatten().tolist()
+        datasets = []
+        for n_reps, indices in sorted(
+                rep_groups.items(), key=lambda x: x[0]
+        ):
+            datasets.append((dataset[sorted(indices)], n_reps))
+        # ds = lazy_dataset.intersperse(*datasets)
         return datasets
 
     def segment_transform_and_fetch(
             self, dataset, segment=True, transform=True, fetch=True,
             train=False,
     ):
+        print(f"length before segmentation, provider: {len(dataset)}")
         segmenter = self.train_segmenter if train else self.test_segmenter
         segment = segment and segmenter is not None
         if segment:
