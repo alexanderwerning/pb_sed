@@ -155,7 +155,7 @@ def positive_class_precisions(target_mat, score_mat):
     ranks = np.cumsum(np.ones_like(retrieved_cumulative_hits), axis=-1)
     # Precision of retrieval list truncated at each hit, in order of pos_labels.
     precision_at_hits = (retrieved_cumulative_hits[target_mat] / ranks[target_mat])
-    return class_indices[target_mat].astype(np.int), precision_at_hits
+    return class_indices[target_mat].astype(int), precision_at_hits
 
 
 def lwlrap_from_precisions(precision_at_hits, class_indices, num_classes=None):
