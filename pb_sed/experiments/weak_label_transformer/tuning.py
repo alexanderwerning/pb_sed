@@ -1,21 +1,25 @@
 import os
-import numpy as np
-from pathlib import Path
 from functools import partial
-from sacred import Experiment as Exp
-from sacred.observers import FileStorageObserver
-from sacred.commands import print_config
-from codecarbon import EmissionsTracker
+from pathlib import Path
 
+import numpy as np
+from paderbox.io.json_module import dump_json, load_json
 from paderbox.utils.timer import timeStamped
-from paderbox.io.json_module import load_json, dump_json
+from padertorch import Configurable
+from pb_sed.data_preparation.provider import DataProvider
+from pb_sed.experiments.weak_label_transformer.inference import \
+    ex as evaluation
+from pb_sed.models import base, weak_label
+from pb_sed.models.weak_label import Transformer
+from pb_sed.models.weak_label.split_transformer import SplitTransformer
+from pb_sed.paths import storage_root
+from sacred import Experiment as Exp
+from sacred.commands import print_config
+from sacred.observers import FileStorageObserver
 from sed_scores_eval import collar_based
 
-from pb_sed.paths import storage_root
-from pb_sed.models import weak_label
-from pb_sed.models import base
-from pb_sed.data_preparation.provider import DataProvider
-from pb_sed.experiments.weak_label_transformer.inference import ex as evaluation
+# from codecarbon import EmissionsTracker
+
 
 
 ex_name = 'weak_label_transformer_hyper_params'
@@ -40,7 +44,7 @@ def config():
     data_provider = model_config['data_provider']
     database_name = model_config.get('database_name', 'desed')
     storage_dir = str(storage_root / 'weak_label_transformer' / database_name / 'hyper_params' / timestamp)
-    assert not Path(storage_dir).exists()
+    # assert not Path(storage_dir).exists()
     del model_config
     data_provider['min_audio_length'] = .01
     data_provider['cached_datasets'] = None
@@ -90,9 +94,9 @@ def main(
     print()
     print_config(_run)
     print(storage_dir)
-    emissions_tracker = EmissionsTracker(
-        output_dir=storage_dir, on_csv_write="update", log_level='error')
-    emissions_tracker.start()
+    # emissions_tracker = EmissionsTracker(
+    #     output_dir=storage_dir, on_csv_write="update", log_level='error')
+    # emissions_tracker.start()
     storage_dir = Path(storage_dir)
 
     boundaries_collar_based_params = {
@@ -124,13 +128,22 @@ def main(
     if not isinstance(model_checkpoints, list):
         assert isinstance(model_checkpoints, str), model_checkpoints
         model_checkpoints = len(model_dirs) * [model_checkpoints]
-    models = [
-        weak_label.Transformer.from_storage_dir(
-            storage_dir=model_dir, config_name='1/config.json',
-            checkpoint_name=model_checkpoint
-        )
-        for model_dir, model_checkpoint in zip(model_dirs, model_checkpoints)
-    ]
+    try:
+        models = [
+            Transformer.from_storage_dir(
+                storage_dir=model_dir, config_name='1/config.json',
+                checkpoint_name=model_checkpoint
+            )
+            for model_dir, model_checkpoint in zip(model_dirs, model_checkpoints)
+        ]
+    except:
+         models = [
+            SplitTransformer.from_storage_dir(
+                storage_dir=model_dir, config_name='1/config.json',
+                checkpoint_name=model_checkpoint
+            )
+            for model_dir, model_checkpoint in zip(model_dirs, model_checkpoints)
+        ]
     data_provider = DataProvider.from_config(data_provider)
     data_provider.test_transform.label_encoder.initialize_labels()
     event_classes = data_provider.test_transform.label_encoder.inverse_label_mapping
@@ -182,7 +195,7 @@ def main(
             **boundaries_collar_based_params,
         ),
     }
-    weak_label.Transformer.tune_boundary_detection(
+    weak_label.transformer.tune_boundary_detection(
         models, dataset, device, timestamps, event_classes, tags, metrics,
         tag_masking=True, stepfilt_lengths=boundaries_filter_lengths,
         storage_dir=storage_dir
@@ -192,15 +205,15 @@ def main(
         metrics = {
             'f': partial(
                 base.f_collar, ground_truth=validation_ground_truth_filepath,
-                return_onset_offset_bias=True, num_jobs=8, **collar_based_params,
-            ),
+                return_onset_offset_bias=True, num_jobs=1, **collar_based_params,
+            ),  # TODO: num_jobs=8
             'auc': partial(
                 base.psd_auc, ground_truth=validation_ground_truth_filepath,
-                audio_durations=audio_durations, num_jobs=8,
+                audio_durations=audio_durations, num_jobs=1,
                 **psds_scenario_1,
-            ),
+            ),  # TODO: num_jobs=8
         }
-        leaderboard = weak_label.Transformer.tune_sound_event_detection(
+        leaderboard = weak_label.transformer.tune_sound_event_detection(
             models, dataset, device, timestamps, event_classes, tags, metrics,
             tag_masking={'f': True, 'auc': '?'},
             window_lengths=detection_window_lengths_scenario_1,
@@ -225,7 +238,7 @@ def main(
                 **psds_scenario_2,
             )
         }
-        leaderboard = weak_label.Transformer.tune_sound_event_detection(
+        leaderboard = weak_label.transformer.tune_sound_event_detection(
             models, dataset, device, timestamps, event_classes, tags, metrics,
             tag_masking=False,
             window_lengths=detection_window_lengths_scenario_2,
@@ -244,8 +257,10 @@ def main(
     for model_dir in model_dirs:
         tuning_dir = Path(model_dir) / 'hyper_params'
         os.makedirs(str(tuning_dir), exist_ok=True)
-        (tuning_dir / storage_dir.name).symlink_to(storage_dir)
-    emissions_tracker.stop()
+        symlink = (tuning_dir / storage_dir.name)
+        if not symlink.exists():
+            symlink.symlink_to(storage_dir)
+    # emissions_tracker.stop()
     print(storage_dir)
 
     if eval_set_name:

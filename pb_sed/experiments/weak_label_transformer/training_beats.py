@@ -179,8 +179,8 @@ def config():
                 'batch_size': batch_size,
                 'prefetch_workers': len(psutil.Process().cpu_affinity())-2,
             },
-            # 'train_segmenter': segmenter,
-            # 'test_segmenter': segmenter,
+            'train_segmenter': segmenter,
+            'test_segmenter': segmenter,
             'min_class_examples_per_epoch': 0.01,
             'storage_dir': storage_dir,
         }
@@ -215,83 +215,8 @@ def config():
 
     # Trainer configuration
     
-    deep_norm = False
-    use_relative_positional_bias = True
-    attention_block_implementation = "own"
-    qkv_bias = True
-    patch_embed_dim = 512
-    net_config = 'ViT-base'
-    if net_config == 'ViT-base':
-        # 86M parameters
-        embed_dim = 768
-        depth = 12
-        num_heads = 12
-    elif net_config == 'ViT-small':
-        # 22M parameters
-        embed_dim = 384
-        depth = 12
-        num_heads = 6
-    elif net_config == 'DeiT-base':
-        # 86M parameters
-        embed_dim = 768
-        depth = 12
-        num_heads = 12
-        use_relative_positional_bias = False
-        attention_block_implementation = "torch"
-        qkv_bias = False
-        patch_embed_dim = embed_dim
-        # pos_enc = {'factory': Learned2DPositionalEncoding}
-    else:
-        raise ValueError(f'Unknown net config {net_config}.')
-
-    # pos_enc = {
-    #     'factory': DisentangledPositionalEncoder,
-    #     'grid': [5, segmenter['max_grid_w'] // patch_size[1]],
-    #     'use_class_token': False,
-    #     'embed_dim': embed_dim,
-    # }
-    # 'pos_enc = {
-    #     'factory': SinCos1DPositionalEncoder,
-    #     'sequence_length': 5 * segmenter['max_grid_w'],  # num_mel_filters // patch_size[0] # maximum number of patches
-    #     'use_class_token': False,
-    #     'embed_dim': embed_dim,
-    # }
-    pos_enc = {
-        'factory': ConvolutionalPositionalEncoder,
-        'kernel_size': 128,
-        'groups': 16,
-        'dropout': 0.1,  # used to initialize the conv weight
-        'use_class_token': False,
-        'embed_dim': embed_dim,
-    }
-    # pos_enc = {
-    #     'factory': DummyPositionalEncoder,
-    #     'embed_dim': embed_dim,
-    #     'use_class_token': False,
-    # }
-    # '/net/home/werning/pretrained/mae_pretrain_vit_base.pth'
-    patch_embed_init_path = None
-    init_ckpt_path = None
-    
-    # TODO: fix
-    if True:
-        # learned positional encoding, disentangled over frequency and time
-        pos_enc =  {
-            'factory': DisentangledPositionalEncoder,
-            'grid': [num_filters// patch_size[0], segmenter['max_grid_w'] // patch_size[1]],
-            'use_class_token': False,
-            'embed_dim': embed_dim,
-            'init': init_ckpt_path,
-            'h_enc': 'learned',
-            'w_enc': 'learned',
-        }
-
     trainer = {
-        'factory': AWTrainer,
-        'clip_summary':  {
-            'factory': 'padertorch.configurable.import_class',
-            'name': 'pb_sed.experiments.weak_label_transformer.training.clip_summary'
-        },
+        'factory': Trainer,
         'model': {
             'factory': Transformer,
             'feature_extractor': {

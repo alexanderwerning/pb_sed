@@ -9,7 +9,6 @@ from pathlib import Path
 from sacred import Experiment as Exp
 from sacred.commands import print_config
 from sacred.observers import FileStorageObserver
-from pathlib import Path
 
 from paderbox.utils.random_utils import (
     LogTruncatedNormal, TruncatedExponential
@@ -22,7 +21,7 @@ from padertorch.contrib.aw.optimizer import AdamW
 from padertorch.train.trainer import Trainer
 from padertorch import Configurable
 
-from pb_sed.models.weak_label.transformer import Transformer
+from pb_sed.models.weak_label.transformer_slices import TransformerSlices
 from pb_sed.paths import storage_root, database_jsons_dir
 from pb_sed.data_preparation.provider import DataProvider
 from pb_sed.database.desed.provider import DESEDProvider
@@ -48,12 +47,7 @@ from padertorch.contrib.aw.positional_encoding import Convolutional2DPositionalE
 from padertorch.contrib.aw.positional_encoding import DisentangledPositionalEncoder
 import lazy_dataset
 from paderbox.utils.nested import flatten, deflatten
-from paderbox.io.new_subdir import NameGenerator
-from padertorch.contrib.aw.name_generator import animal_names, food_names, thing_names
-import paderbox
-import sacred
 
-sacred.SETTINGS.CONFIG.READ_ONLY_CONFIG = False
 ex_name = 'weak_label_transformer_training'
 ex = Exp(ex_name)
 
@@ -62,13 +56,11 @@ ex = Exp(ex_name)
 def config():
     delay = 0
     debug = False
-    # todo: set name for fine_tuning based on old ensemble name
-    group_name = NameGenerator(lists=(animal_names, food_names, thing_names))()
     dt = datetime.datetime.now()
     timestamp = dt.strftime('%Y-%m-%d-%H-%M-%S-{:02d}').format(
         int(dt.microsecond/10000)) + ('_debug' if debug else '')
     del dt
-    # group_name = timestamp
+    group_name = timestamp
     database_name = 'desed'
     storage_dir = str(storage_root / 'weak_label_transformer' /
                       database_name / 'training' / group_name / timestamp)
@@ -82,30 +74,12 @@ def config():
     init_ckpt_path = None
     freeze_norm_stats = True
     finetune_mode = init_ckpt_path is not None
-    patch_size = [16, 16]
+    patch_size = [20, 1]
     patch_overlap = [0, 0]
     no_regularization = False
     debug_train_mode = 'single'
     use_lr_scheduler = False
     num_filters = 80
-
-    segmenter = {
-        'factory': TimeDomainViTSegmenter,
-        'pad_last': False,
-        'patch_size': patch_size,
-        'patch_overlap': patch_overlap,
-        'max_grid_w': 600,  # 10s audio @16kHz with 320 samples shift + 100
-        'allow_shorter_segments': True,
-        'stft': {
-            'factory': STFT,
-            'shift': 320,
-            'window_length': 960,
-            'size': 1024,
-            'fading': 'half',
-            'pad': True,
-            'alignment_keys': ['events'],
-        },
-    }
 
     # Data provider
     if database_name == 'desed':
@@ -179,8 +153,6 @@ def config():
                 'batch_size': batch_size,
                 'prefetch_workers': len(psutil.Process().cpu_affinity())-2,
             },
-            # 'train_segmenter': segmenter,
-            # 'test_segmenter': segmenter,
             'min_class_examples_per_epoch': 0.01,
             'storage_dir': storage_dir,
         }
@@ -220,7 +192,8 @@ def config():
     attention_block_implementation = "own"
     qkv_bias = True
     patch_embed_dim = 512
-    net_config = 'ViT-base'
+    net_config = 'DeiT-base'
+    patch_embed_init_path = None
     if net_config == 'ViT-base':
         # 86M parameters
         embed_dim = 768
@@ -240,51 +213,15 @@ def config():
         attention_block_implementation = "torch"
         qkv_bias = False
         patch_embed_dim = embed_dim
-        # pos_enc = {'factory': Learned2DPositionalEncoding}
-    else:
-        raise ValueError(f'Unknown net config {net_config}.')
 
-    # pos_enc = {
-    #     'factory': DisentangledPositionalEncoder,
-    #     'grid': [5, segmenter['max_grid_w'] // patch_size[1]],
-    #     'use_class_token': False,
-    #     'embed_dim': embed_dim,
-    # }
-    # 'pos_enc = {
-    #     'factory': SinCos1DPositionalEncoder,
-    #     'sequence_length': 5 * segmenter['max_grid_w'],  # num_mel_filters // patch_size[0] # maximum number of patches
-    #     'use_class_token': False,
-    #     'embed_dim': embed_dim,
-    # }
+    max_grid_w = 250
     pos_enc = {
-        'factory': ConvolutionalPositionalEncoder,
-        'kernel_size': 128,
-        'groups': 16,
-        'dropout': 0.1,  # used to initialize the conv weight
+        'factory': SinCos1DPositionalEncoder,
+        'sequence_length': max_grid_w,  # num_mel_filters // patch_size[0] # maximum number of patches
         'use_class_token': False,
         'embed_dim': embed_dim,
     }
-    # pos_enc = {
-    #     'factory': DummyPositionalEncoder,
-    #     'embed_dim': embed_dim,
-    #     'use_class_token': False,
-    # }
-    # '/net/home/werning/pretrained/mae_pretrain_vit_base.pth'
-    patch_embed_init_path = None
-    init_ckpt_path = None
-    
-    # TODO: fix
-    if True:
-        # learned positional encoding, disentangled over frequency and time
-        pos_enc =  {
-            'factory': DisentangledPositionalEncoder,
-            'grid': [num_filters// patch_size[0], segmenter['max_grid_w'] // patch_size[1]],
-            'use_class_token': False,
-            'embed_dim': embed_dim,
-            'init': init_ckpt_path,
-            'h_enc': 'learned',
-            'w_enc': 'learned',
-        }
+   
 
     trainer = {
         'factory': AWTrainer,
@@ -293,7 +230,7 @@ def config():
             'name': 'pb_sed.experiments.weak_label_transformer.training.clip_summary'
         },
         'model': {
-            'factory': Transformer,
+            'factory': TransformerSlices,
             'feature_extractor': {
                 'sample_rate':
                     data_provider['audio_reader']['target_sample_rate'],
@@ -341,12 +278,12 @@ def config():
                 'init_mode': 'deep_norm' if deep_norm else 'xlm',
                 'rel_pos_bias_factory': {
                     'factory': RelativePositionalBiasFactory,
-                    'style': '2d',
-                    'grid': [5, segmenter['max_grid_w'] // patch_size[1]],
-                    # 'gated': True,
-                    # 'num_buckets': 320,
-                    # 'max_distance': 800,
-                    # 'gate_dim': 8,
+                    # 'style': '2d',
+                    # 'grid': [5, segmenter['max_grid_w'] // patch_size[1]],
+                    'gated': True,
+                    'num_buckets': 320,
+                    'max_distance': 800,
+                    'gate_dim': 8,
                 } if use_relative_positional_bias else False,
             },
             'encoder_bwd': {
@@ -368,12 +305,12 @@ def config():
                 'init_mode': 'deep_norm' if deep_norm else 'xlm',
                 'rel_pos_bias_factory': {
                     'factory': RelativePositionalBiasFactory,
-                    'style': '2d',
-                    'grid': [5, segmenter['max_grid_w'] // patch_size[1]],
-                    # 'gated': True,
-                    # 'num_buckets': 320,
-                    # 'max_distance': 800,
-                    # 'gate_dim': 8,
+                    # 'style': '2d',
+                    # 'grid': [5, segmenter['max_grid_w'] // patch_size[1]],
+                    'gated': True,
+                    'num_buckets': 320,
+                    'max_distance': 800,
+                    'gate_dim': 8,
                 } if use_relative_positional_bias else False,
             },
             'pos_enc': pos_enc,
@@ -393,7 +330,7 @@ def config():
                           'num_classes': num_events,
                           'classifier_hidden_dims': [],
                           'pooling_op': 'mean',
-                          'pooling_num_patches': 5,
+                          'pooling_num_patches': 1,
                           'apply_softmax': False,
                           },
             'predictor_bwd': {'factory': PredictorHead,
@@ -401,7 +338,7 @@ def config():
                               'num_classes': num_events,
                               'classifier_hidden_dims': [],
                               'pooling_op': 'mean',
-                              'pooling_num_patches': 5,
+                              'pooling_num_patches': 1,
                               'apply_softmax': False,
                               },
             'share_weights_transformer': False,
@@ -532,39 +469,43 @@ def debug_train(_run, debug, resume,
     )
 
 
-@ex.automain
-def train(
-        _run, debug, resume, delay,
-        data_provider, filter_desed_test_clips, trainer, lr_rampup_steps,
-        n_back_off, back_off_patience, lr_decay_steps, lr_decay_factor,
-        early_stopping_patience,
-        init_ckpt_path, freeze_norm_stats,
-        validation_set_name, validation_ground_truth_filepath,
-        eval_set_name, eval_ground_truth_filepath,
-        device, track_emissions, hyper_params_tuning_batch_size,
-        use_lr_scheduler
-):
+@ex.command
+def fine_tune(_run, debug, resume, delay,
+              data_provider, filter_desed_test_clips, trainer, lr_rampup_steps,
+              n_back_off, back_off_patience, lr_decay_steps, lr_decay_factor,
+              early_stopping_patience,
+              init_ckpt_path, freeze_norm_stats,
+              validation_set_name, validation_ground_truth_filepath,
+              eval_set_name, eval_ground_truth_filepath,
+              device, track_emissions, hyper_params_tuning_batch_size,
+              use_lr_scheduler, freeze_model):
+    # load weights without classifier, feature_extractor
+    assert init_ckpt_path is not None
     print()
-    print('##### Training #####')
+    print('##### Fine-Tuning #####')
     print()
-    print_config(_run)
-    assert (n_back_off == 0) or (len(lr_decay_steps)
-                                 == 0), (n_back_off, lr_decay_steps)
-    if delay > 0:
-        print(f'Sleep for {delay} seconds.')
-        time.sleep(delay)
-
     data_provider, trainer, train_set, validate_set = prepare(
         data_provider, trainer, filter_desed_test_clips)
+    print(f'Load init params from {init_ckpt_path}')
+    state_dict = deflatten(torch.load(
+        init_ckpt_path, map_location='cpu')['model'])
+    # load forward transformer, backward transformer, patch_embedding, and position_embedding
+    trainer.model.encoder.load_state_dict(
+        flatten(state_dict['encoder']), strict=False)
+    trainer.model.encoder_bwd.load_state_dict(
+        flatten(state_dict['encoder_bwd']), strict=False)
+    trainer.model.patch_embed.load_state_dict(
+        flatten(state_dict['patch_embed']), strict=False)
+    trainer.model.pos_enc.load_state_dict(
+        flatten(state_dict['pos_enc']), strict=False)
 
-    print('Params', sum(p.numel() for p in trainer.model.parameters()))
+    if freeze_model:
+        trainer.model.encoder.requires_grad_(False)
+        trainer.model.encoder_bwd.requires_grad_(False)
+        trainer.model.patch_embed.requires_grad_(False)
+        trainer.model.pos_enc.requires_grad_(False)
 
-    if init_ckpt_path is not None:
-        print('Load init params')
-        state_dict = torch.load(init_ckpt_path, map_location='cpu')[
-            'model']
-        trainer.model.load_state_dict(state_dict, strict=False)
-
+    # start training with new classifier
     if validate_set is not None:
         trainer.test_run(train_set, validate_set)
         trainer.register_validation_hook(
@@ -605,7 +546,94 @@ def train(
     if validation_set_name is not None:
         tuning.run(
             config_updates={
-                ''
+                'debug': debug,
+                'model_dirs': [str(trainer.storage_dir)],
+                'validation_set_name': validation_set_name,
+                'validation_ground_truth_filepath': validation_ground_truth_filepath,
+                'eval_set_name': eval_set_name,
+                'eval_ground_truth_filepath': eval_ground_truth_filepath,
+                'data_provider': {
+                    'test_fetcher': {
+                        'batch_size': hyper_params_tuning_batch_size,
+                    }
+                },
+            }
+        )
+
+
+@ex.automain
+def train(
+        _run, debug, resume, delay,
+        data_provider, filter_desed_test_clips, trainer, lr_rampup_steps,
+        n_back_off, back_off_patience, lr_decay_steps, lr_decay_factor,
+        early_stopping_patience,
+        init_ckpt_path, freeze_norm_stats,
+        validation_set_name, validation_ground_truth_filepath,
+        eval_set_name, eval_ground_truth_filepath,
+        device, track_emissions, hyper_params_tuning_batch_size,
+        use_lr_scheduler
+):
+    print()
+    print('##### Training #####')
+    print()
+    print_config(_run)
+    assert (n_back_off == 0) or (len(lr_decay_steps)
+                                 == 0), (n_back_off, lr_decay_steps)
+    if delay > 0:
+        print(f'Sleep for {delay} seconds.')
+        time.sleep(delay)
+
+    data_provider, trainer, train_set, validate_set = prepare(
+        data_provider, trainer, filter_desed_test_clips)
+
+    print('Params', sum(p.numel() for p in trainer.model.parameters()))
+
+    if init_ckpt_path is not None:
+        print('Load init params')
+        state_dict = torch.load(init_ckpt_path, map_location='cpu')[
+            'model']
+        trainer.model.load_state_dict(state_dict, strict=False)
+
+    if validate_set is not None:
+        trainer.test_run(train_set, validate_set, device=device)
+        trainer.register_validation_hook(
+            validate_set, metric='macro_fscore_weak', maximize=True,
+            back_off_patience=back_off_patience,
+            n_back_off=n_back_off,
+            lr_update_factor=lr_decay_factor,
+            early_stopping_patience=early_stopping_patience,
+        )
+
+    breakpoints = []
+    if lr_rampup_steps is not None:
+        breakpoints += [(0, 0.), (lr_rampup_steps, 1.)]
+    for i, lr_decay_step in enumerate(lr_decay_steps):
+        breakpoints += [(lr_decay_step, lr_decay_factor**i),
+                        (lr_decay_step, lr_decay_factor**(i+1))]
+    if len(breakpoints) > 0:
+        if isinstance(trainer.optimizer, dict):
+            names = sorted(trainer.optimizer.keys())
+        else:
+            names = [None]
+        for name in names:
+            trainer.register_hook(LRAnnealingHook(
+                trigger=AllTrigger(
+                    (100, 'iteration'),
+                    NotTrigger(EndTrigger(
+                        breakpoints[-1][0]+100, 'iteration')),
+                ),
+                breakpoints=breakpoints,
+                unit='iteration',
+                name=name,
+            ))
+    trainer.train(
+        train_set, resume=resume, device=device,
+        track_emissions=track_emissions,
+    )
+
+    if validation_set_name is not None:
+        tuning.run(
+            config_updates={
                 'debug': debug,
                 'model_dirs': [str(trainer.storage_dir)],
                 'validation_set_name': validation_set_name,

@@ -5,7 +5,7 @@ from copy import deepcopy
 from sacred import Experiment as Exp
 from sacred.observers import FileStorageObserver
 from sacred.commands import print_config
-from codecarbon import EmissionsTracker
+# from codecarbon import EmissionsTracker
 
 from paderbox.utils.timer import timeStamped
 from paderbox.io.json_module import load_json, dump_json
@@ -19,7 +19,7 @@ from pb_sed.models.weak_label import Transformer
 from pb_sed.models import base
 from pb_sed.data_preparation.provider import DataProvider
 from pb_sed.utils.segment import merge_segments
-
+from pb_sed.models.weak_label.split_transformer import SplitTransformer
 ex_name = 'weak_label_transformer_inference'
 ex = Exp(ex_name)
 
@@ -38,8 +38,8 @@ def config():
     model_checkpoints = tuning_config['model_checkpoints']
     data_provider = tuning_config['data_provider']
     database_name = tuning_config['database_name']
-    storage_dir = str(storage_root / 'weak_label_model' / database_name / 'inference' / timestamp)
-    assert not Path(storage_dir).exists()
+    storage_dir = str(storage_root / 'weak_label_transformer' / database_name / 'inference' / timestamp)
+    # assert not Path(storage_dir).exists()
     del tuning_config
     sed_hyper_params_name = ['f', 'psds1']
 
@@ -371,9 +371,9 @@ def main(
     print()
     print_config(_run)
     print(storage_dir)
-    emissions_tracker = EmissionsTracker(
-        output_dir=storage_dir, on_csv_write="update", log_level='error')
-    emissions_tracker.start()
+    # emissions_tracker = EmissionsTracker(
+    #     output_dir=storage_dir, on_csv_write="update", log_level='error')
+    # emissions_tracker.start()
     storage_dir = Path(storage_dir)
 
     boundary_collar_based_params = {
@@ -404,15 +404,23 @@ def main(
     if not isinstance(model_checkpoints, list):
         assert isinstance(model_checkpoints, str), model_checkpoints
         model_checkpoints = len(model_dirs) * [model_checkpoints]
-    models = [
-        Transformer.from_storage_dir(
-            storage_dir=model_dir, config_name='1/config.json',
-            checkpoint_name=model_checkpoint
-        )
-        for model_dir, model_checkpoint in zip(model_dirs, model_checkpoints)
-    ]
+    try:
+        models = [
+            Transformer.from_storage_dir(
+                storage_dir=model_dir, config_name='1/config.json',
+                checkpoint_name=model_checkpoint
+            )
+            for model_dir, model_checkpoint in zip(model_dirs, model_checkpoints)
+        ]
+    except:
+         models = [
+            SplitTransformer.from_storage_dir(
+                storage_dir=model_dir, config_name='1/config.json',
+                checkpoint_name=model_checkpoint
+            )
+            for model_dir, model_checkpoint in zip(model_dirs, model_checkpoints)
+        ]
     print('Params', sum([p.numel() for model in models for p in model.parameters()]))
-    print('CNN2d Params', sum([p.numel() for model in models for p in model.cnn.cnn_2d.parameters()]))
     data_provider = DataProvider.from_config(data_provider)
     data_provider.test_transform.label_encoder.initialize_labels()
     event_classes = data_provider.test_transform.label_encoder.inverse_label_mapping
@@ -550,5 +558,5 @@ def main(
     inference_dir = Path(hyper_params_dir) / 'inference'
     os.makedirs(str(inference_dir), exist_ok=True)
     (inference_dir / storage_dir.name).symlink_to(storage_dir)
-    emissions_tracker.stop()
+    # emissions_tracker.stop()
     print(storage_dir)
