@@ -21,7 +21,7 @@ class MixtureDataset(Dataset):
             mix_interval: int, how often to mix in examples from mixin_dataset.
             mix_fn: function, takes list of examples and returns a single example.
         """
-        assert len(mixin_dataset) >= len(input_dataset), (len(mixin_dataset), len(input_dataset))
+        # assert len(mixin_dataset) >= len(input_dataset), (len(mixin_dataset), len(input_dataset))
         self.input_dataset = input_dataset
         self.mixin_dataset = mixin_dataset
         assert mix_interval >= 1
