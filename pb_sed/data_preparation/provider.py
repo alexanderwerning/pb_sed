@@ -58,7 +58,7 @@ class DataProvider(Configurable):
 
     audio_reader: Callable
 
-    train_set: dict
+    train_set: Dict[str, int]
     validate_set: str = None
 
     cached_datasets: list = None
@@ -127,12 +127,12 @@ class DataProvider(Configurable):
                 )
                 raw_datasets.append((raw_dataset, reps))
                     
-            label_counts, labels = self._count_labels(
+            label_counts, labels = DataProvider._count_labels(
                 raw_datasets, self.label_key)
-            label_reps = self._compute_label_repetitions(
+            label_reps = DataProvider._compute_label_repetitions(
                 label_counts, min_counts=self.min_class_examples_per_epoch)
             # apply label count information to datasets with loaded audio
-            repetition_groups = self._build_repetition_groups(
+            repetition_groups = DataProvider._build_repetition_groups(
                 individual_audio_datasets, labels, label_reps)
             logging.info(f"provider num repetition_groups {len(repetition_groups)}")
         else:
@@ -291,8 +291,8 @@ class DataProvider(Configurable):
             )
         return dataset
 
-    def _count_labels(self,
-                      raw_datasets: List[Tuple[lazy_dataset.Dataset, int]],
+    @staticmethod
+    def _count_labels(raw_datasets: List[Tuple[lazy_dataset.Dataset, int]],
                       label_key,
                       reps=1) -> Tuple[Dict[str, int], List[List[List[str]]]]:
         """Count the labels in a dataset.
@@ -348,7 +348,8 @@ class DataProvider(Configurable):
         }
         return label_repetitions
 
-    def _build_repetition_groups(self,
+    @staticmethod
+    def _build_repetition_groups(
     dataset: List[Tuple[lazy_dataset.Dataset, int]],
     labels: List[List[List[str]]],
     label_repetitions) -> List[Tuple[lazy_dataset.Dataset, int]]:
@@ -479,7 +480,10 @@ class DataProvider(Configurable):
         if config['mix_interval'] is not None:
             config['mix_fn'] = {
                 'factory': SuperposeEvents,
-                'min_overlap': 1.,
-                'fade_length': config['train_transform']['stft']['window_length'],
-                'label_key': 'events',
             }
+            if config['mix_fn']['factory'] == SuperposeEvents:
+                config['mix_fn'].update({
+                    'min_overlap': 1.,
+                    'fade_length': config['train_transform']['stft']['window_length'],
+                    'label_key': 'events',
+                })
