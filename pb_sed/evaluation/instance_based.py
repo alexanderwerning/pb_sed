@@ -216,7 +216,7 @@ def lwlrap(target_mat, score_mat):
     >>> per_class_lwlrap = lwlrap(truth, scores)
     """
     if not target_mat.any():
-        return 0.0, np.zeros(target_mat.shape[-1])
+        return 0.0, np.zeros(target_mat.shape[-1]), np.zeros(target_mat.shape[-1])
     assert score_mat.ndim == 2, score_mat.shape
     assert target_mat.shape == score_mat.shape
     pos_class_indices, precision_at_hits = positive_class_precisions(
