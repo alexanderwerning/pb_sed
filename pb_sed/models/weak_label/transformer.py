@@ -469,14 +469,7 @@ class Transformer(base.SoundEventModel):
         return loss
 
     def modify_summary(self, summary):
-        """called by the trainer before dumping a summary
-
-        Args:
-            summary:
-
-        Returns:
-
-        """
+        """called by the trainer before dumping a summary"""
         if f'targets_weak' in summary['buffers']:
             # Computes fscores from scores and targets
             self.add_metrics_to_summary(summary, 'weak')
